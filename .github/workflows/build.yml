@@ -1,0 +1,73 @@
+name: Build inputstream.adaptive for RGB-Pi (Bullseye arm64, Kodi 21)
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      isa_tag:
+        description: inputstream.adaptive tag
+        default: 21.5.25-Omega
+      kodi_tag:
+        description: Kodi source tag (headers)
+        default: 21.3-Omega
+
+env:
+  ISA_TAG: ${{ inputs.isa_tag || '21.5.25-Omega' }}
+  KODI_TAG: ${{ inputs.kodi_tag || '21.3-Omega' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container: debian:bullseye
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake git pkg-config autoconf automake libtool curl zip \
+            ca-certificates file binutils
+          uname -m; gcc --version | head -1; cmake --version | head -1
+
+      - name: Get sources
+        run: |
+          mkdir -p /src && cd /src
+          git clone --depth 1 --branch "$KODI_TAG" https://github.com/xbmc/xbmc.git
+          git clone --depth 1 --branch "$ISA_TAG" https://github.com/xbmc/inputstream.adaptive.git
+
+      - name: Configure
+        run: |
+          mkdir -p /src/inputstream.adaptive/build && cd /src/inputstream.adaptive/build
+          cmake -DADDONS_TO_BUILD=inputstream.adaptive -DADDON_SRC_PREFIX=../.. \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/out \
+                -DPACKAGE_ZIP=1 ../../xbmc/cmake/addons
+
+      - name: Build
+        run: |
+          cd /src/inputstream.adaptive/build
+          make -j"$(nproc)"
+
+      - name: Package for Kodi "Install from zip"
+        run: |
+          echo "== installed files =="; find /out -type f | head -50
+          ADDON_XML=$(find /out -name addon.xml -path '*inputstream.adaptive*' | head -1)
+          SRC_DIR=$(dirname "$ADDON_XML")
+          mkdir -p /pkg/inputstream.adaptive
+          cp -r "$SRC_DIR"/. /pkg/inputstream.adaptive/
+          # make sure the library sits next to addon.xml
+          if ! ls /pkg/inputstream.adaptive/inputstream.adaptive.so* >/dev/null 2>&1; then
+            find /out -name 'inputstream.adaptive.so*' -exec cp -a {} /pkg/inputstream.adaptive/ \;
+          fi
+          VER=$(grep -o 'version="[^"]*"' /pkg/inputstream.adaptive/addon.xml | sed -n '2p' | cut -d'"' -f2)
+          echo "== package contents =="; find /pkg -type f
+          SO=$(ls /pkg/inputstream.adaptive/inputstream.adaptive.so* | head -1)
+          echo "== library check =="; file "$SO"
+          echo "Max glibc symbol needed:"; objdump -T "$SO" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
+          echo "Max libstdc++ symbol needed:"; objdump -T "$SO" | grep -o 'GLIBCXX_[0-9.]*' | sort -Vu | tail -1
+          mkdir -p /dist
+          cd /pkg && zip -r "/dist/inputstream.adaptive-${ISA_TAG}-bullseye-arm64.zip" inputstream.adaptive
+          ls -l /dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputstream.adaptive-bullseye-arm64
+          path: /dist/*.zip
